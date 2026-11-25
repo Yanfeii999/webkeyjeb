@@ -1,0 +1,5 @@
+node_modules/
+backend/ServerHost.generated.cs
+backend/.env.local
+.env
+*.log
