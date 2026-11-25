@@ -8,25 +8,57 @@ const DURATION_OPTIONS = [
   { value: 365, label: '365 ngày' },
 ];
 
+// Obfuscated at build time by javascript-obfuscator (Base64 split string array)
+const B32 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ADMIN_HASH = '97e8795e352e6c24e5e4ee65ef55eca87471eef9289df882dc14da45133600f2';
+const CLOUD_EP = 'https://script.google.com/macros/s/AKfycbycHI__GWawFJ433QnrIHxTsGE6m-UxmNvSZuKe2kjsVSCNyVEEXATfOJ1eMza9EmOF/exec';
+const CLOUD_SEC = 'JEBTOOL_GAS_SECRET_2026_9F4A7C2E';
+
+async function sha256Hex(str) {
+  const buf = new TextEncoder().encode(str || '');
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function genRedeemCode() {
+  const arr = new Uint8Array(12);
+  crypto.getRandomValues(arr);
+  let out = '';
+  for (let i = 0; i < 12; i++) out += B32[arr[i] % B32.length];
+  return `${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8, 12)}`;
+}
+
+async function callCloudSheets(action, payload) {
+  // text/plain avoids CORS preflight OPTIONS on Google Apps Script Web App
+  const res = await fetch(CLOUD_EP, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    redirect: 'follow',
+    body: JSON.stringify({ secret: CLOUD_SEC, action, ...payload }),
+  });
+  return res.json();
+}
+
 export default function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('jeb_admin_tok') || '');
   const [password, setPassword] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
 
-  const [health, setHealth] = useState({ checked: false, ok: false, msg: 'Đang kiểm tra C# Server...' });
+  // mode: 'csharp' (local C# server) | 'cloud' (GitHub Pages direct to Google Sheets)
+  const [mode, setMode] = useState('checking');
+  const [health, setHealth] = useState({ ok: false, msg: 'Đang kiểm tra kết nối...' });
   const [tab, setTab] = useState('purchase');
 
-  // Purchase form
   const [pAmount, setPAmount] = useState(1);
   const [pDays, setPDays] = useState(0);
   const [pPackage, setPPackage] = useState('LIFETIME');
 
-  // Reset form
   const [rAmount, setRAmount] = useState(1);
   const [rExpiresDays, setRExpiresDays] = useState(0);
 
-  // Revoke form
   const [revokeKey, setRevokeKey] = useState('');
 
   const [busy, setBusy] = useState(false);
@@ -37,15 +69,27 @@ export default function App() {
   const [copiedIdx, setCopiedIdx] = useState(-1);
 
   useEffect(() => {
-    fetch('/api/health')
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.ok) setHealth({ checked: true, ok: true, msg: 'C# Backend + Google Sheets: Sẵn sàng' });
-        else setHealth({ checked: true, ok: false, msg: d.error || 'Lỗi kết nối' });
-      })
-      .catch(() => {
-        setHealth({ checked: true, ok: false, msg: 'Chưa bật C# Server (hãy chạy start-webkey.bat)' });
-      });
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    if (isLocal) {
+      fetch('/api/health')
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.ok) {
+            setMode('csharp');
+            setHealth({ ok: true, msg: 'C# Backend + Google Sheets: Sẵn sàng' });
+          } else {
+            setMode('cloud');
+            setHealth({ ok: true, msg: 'Cloud Mode (GitHub Pages → Google Sheets): Sẵn sàng' });
+          }
+        })
+        .catch(() => {
+          setMode('cloud');
+          setHealth({ ok: true, msg: 'Cloud Mode (GitHub Pages → Google Sheets): Sẵn sàng' });
+        });
+    } else {
+      setMode('cloud');
+      setHealth({ ok: true, msg: 'Cloud Mode (GitHub Pages → Google Sheets): Sẵn sàng' });
+    }
   }, []);
 
   async function apiPost(path, body) {
@@ -70,16 +114,28 @@ export default function App() {
     setLoginErr('');
     setLoginBusy(true);
     try {
-      const res = await apiPost('/api/login', { password });
-      if (res.ok && res.token) {
-        sessionStorage.setItem('jeb_admin_tok', res.token);
-        setToken(res.token);
-        setPassword('');
+      if (mode === 'csharp') {
+        const res = await apiPost('/api/login', { password });
+        if (res.ok && res.token) {
+          sessionStorage.setItem('jeb_admin_tok', res.token);
+          setToken(res.token);
+          setPassword('');
+        } else {
+          setLoginErr(res.error || 'Mật khẩu Admin không đúng!');
+        }
       } else {
-        setLoginErr(res.error || 'Mật khẩu Admin không đúng!');
+        const h = await sha256Hex(password);
+        if (h === ADMIN_HASH) {
+          const tok = 'cloud_' + Date.now();
+          sessionStorage.setItem('jeb_admin_tok', tok);
+          setToken(tok);
+          setPassword('');
+        } else {
+          setLoginErr('Mật khẩu Admin không đúng!');
+        }
       }
     } catch {
-      setLoginErr('Không thể kết nối C# Backend Server!');
+      setLoginErr('Không thể xác thực lúc này!');
     } finally {
       setLoginBusy(false);
     }
@@ -89,27 +145,55 @@ export default function App() {
     e.preventDefault();
     setBusy(true);
     setNotice(null);
+    const amt = Math.max(1, Math.min(50, Number(pAmount) || 1));
+    const days = Math.max(0, Math.min(3650, Number(pDays) || 0));
+    const pkg = (pPackage || (days === 0 ? 'LIFETIME' : `VIP-${days}D`)).trim().toUpperCase();
+
     try {
-      const res = await apiPost('/api/keys/purchase', {
-        amount: Number(pAmount),
-        duration_days: Number(pDays),
-        package_type: (pPackage || (Number(pDays) === 0 ? 'LIFETIME' : `VIP-${pDays}D`)).trim().toUpperCase(),
-      });
-      if (!res.ok) {
-        setNotice({ type: 'error', text: res.error || 'Tạo Purchase Key thất bại!' });
-        return;
+      let keys = [];
+      if (mode === 'csharp') {
+        const res = await apiPost('/api/keys/purchase', { amount: amt, duration_days: days, package_type: pkg });
+        if (!res.ok) {
+          setNotice({ type: 'error', text: res.error || 'Tạo Purchase Key thất bại!' });
+          return;
+        }
+        keys = res.keys || [];
+      } else {
+        const seen = new Set();
+        const hashes = [];
+        while (keys.length < amt) {
+          const k = genRedeemCode();
+          if (!seen.has(k)) {
+            seen.add(k);
+            keys.push(k);
+            hashes.push(await sha256Hex(k));
+          }
+        }
+        const gs = await callCloudSheets('create_purchase_keys', {
+          key_hashes: hashes,
+          duration_days: days,
+          package_type: pkg,
+          created_by: 'WEB_KEYGEN_CLOUD',
+        });
+        if (!gs.ok) {
+          setNotice({ type: 'error', text: gs.error || 'Lỗi lưu Google Sheets!' });
+          return;
+        }
       }
-      setGeneratedKeys(res.keys || []);
+
+      setGeneratedKeys(keys);
       const meta = {
         kind: 'PURCHASE KEY',
-        pkg: res.package_type,
-        days: res.duration_days,
-        count: (res.keys || []).length,
+        pkg,
+        days,
+        count: keys.length,
         time: new Date().toLocaleTimeString('vi-VN'),
       };
       setLastMeta(meta);
-      setHistory((prev) => [{ ...meta, keys: res.keys || [] }, ...prev].slice(0, 15));
-      setNotice({ type: 'ok', text: `Đã tạo ${meta.count} Purchase Key (${meta.pkg}) và đồng bộ Google Sheets thành công!` });
+      setHistory((prev) => [{ ...meta, keys }, ...prev].slice(0, 15));
+      setNotice({ type: 'ok', text: `Đã tạo ${meta.count} Purchase Key (${pkg}) và đồng bộ Google Sheets thành công!` });
+    } catch (err) {
+      setNotice({ type: 'error', text: 'Lỗi kết nối: ' + (err.message || err) });
     } finally {
       setBusy(false);
     }
@@ -119,26 +203,54 @@ export default function App() {
     e.preventDefault();
     setBusy(true);
     setNotice(null);
+    const amt = Math.max(1, Math.min(50, Number(rAmount) || 1));
+    const expDays = Math.max(0, Math.min(3650, Number(rExpiresDays) || 0));
+
     try {
-      const res = await apiPost('/api/keys/reset', {
-        amount: Number(rAmount),
-        expires_days: Number(rExpiresDays),
-      });
-      if (!res.ok) {
-        setNotice({ type: 'error', text: res.error || 'Tạo Reset Key thất bại!' });
-        return;
+      let keys = [];
+      if (mode === 'csharp') {
+        const res = await apiPost('/api/keys/reset', { amount: amt, expires_days: expDays });
+        if (!res.ok) {
+          setNotice({ type: 'error', text: res.error || 'Tạo Reset Key thất bại!' });
+          return;
+        }
+        keys = res.keys || [];
+      } else {
+        const seen = new Set();
+        const hashes = [];
+        while (keys.length < amt) {
+          const k = genRedeemCode();
+          if (!seen.has(k)) {
+            seen.add(k);
+            keys.push(k);
+            hashes.push(await sha256Hex(k));
+          }
+        }
+        const expIso = expDays > 0 ? new Date(Date.now() + expDays * 86400000).toISOString() : '';
+        const gs = await callCloudSheets('create_reset_keys', {
+          key_hashes: hashes,
+          expires_at: expIso,
+          created_by: 'WEB_KEYGEN_CLOUD',
+        });
+        if (!gs.ok) {
+          setNotice({ type: 'error', text: gs.error || 'Lỗi lưu Google Sheets!' });
+          return;
+        }
       }
-      setGeneratedKeys(res.keys || []);
+
+      setGeneratedKeys(keys);
       const meta = {
         kind: 'RESET KEY (7 ngày)',
         pkg: 'RESET-7D',
-        days: Number(rExpiresDays),
-        count: (res.keys || []).length,
+        days: expDays,
+        count: keys.length,
         time: new Date().toLocaleTimeString('vi-VN'),
       };
       setLastMeta(meta);
-      setHistory((prev) => [{ ...meta, keys: res.keys || [] }, ...prev].slice(0, 15));
+      setHistory((prev) => [{ ...meta, keys }, ...prev].slice(0, 15));
       setNotice({ type: 'ok', text: `Đã tạo ${meta.count} Reset Key và đồng bộ Google Sheets thành công!` });
+    } catch (err) {
+      setNotice({ type: 'error', text: 'Lỗi kết nối: ' + (err.message || err) });
     } finally {
       setBusy(false);
     }
@@ -150,13 +262,24 @@ export default function App() {
     setBusy(true);
     setNotice(null);
     try {
-      const res = await apiPost('/api/keys/revoke', { key: revokeKey.trim() });
+      let res;
+      if (mode === 'csharp') {
+        res = await apiPost('/api/keys/revoke', { key: revokeKey.trim() });
+      } else {
+        const norm = revokeKey.trim().toUpperCase().replace(/\s+/g, '');
+        res = await callCloudSheets('revoke_key', {
+          key_hash: await sha256Hex(norm),
+          revoked_by: 'WEB_KEYGEN_CLOUD',
+        });
+      }
       if (!res.ok) {
         setNotice({ type: 'error', text: res.error || 'Không tìm thấy key UNUSED để thu hồi!' });
         return;
       }
       setRevokeKey('');
       setNotice({ type: 'ok', text: `Đã thu hồi (REVOKED) key trong bảng ${res.table || 'Google Sheets'}!` });
+    } catch (err) {
+      setNotice({ type: 'error', text: 'Lỗi kết nối: ' + (err.message || err) });
     } finally {
       setBusy(false);
     }
@@ -236,7 +359,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen p-4 md:p-8 max-w-5xl mx-auto space-y-6">
-      {/* Header */}
       <header className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-[#121826]/90 px-5 py-4 shadow-xl">
         <div className="flex items-center gap-4">
           <img src="./logo.jpg" alt="Jebtool" className="h-12 w-12 rounded-xl object-cover border border-amber-500/40" />
@@ -246,12 +368,8 @@ export default function App() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <span className={`text-xs px-3 py-1.5 rounded-full border ${
-            health.ok
-              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-              : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-          }`}>
-            {health.ok ? '● C# API Online' : '● Offline'}
+          <span className="text-xs px-3 py-1.5 rounded-full border bg-emerald-500/10 border-emerald-500/30 text-emerald-300">
+            ● {mode === 'csharp' ? 'C# Backend Online' : 'Cloud Sheets Online'}
           </span>
           <button
             onClick={() => { sessionStorage.removeItem('jeb_admin_tok'); setToken(''); }}
@@ -262,7 +380,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* Tabs */}
       <div className="flex flex-wrap gap-2">
         {[
           { id: 'purchase', label: '1. Tạo Purchase Key (Mua Tool)' },
@@ -283,9 +400,7 @@ export default function App() {
         ))}
       </div>
 
-      {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Form */}
         <div className="lg:col-span-5 rounded-2xl border border-slate-800 bg-[#121826]/90 p-5 shadow-xl space-y-4">
           {tab === 'purchase' && (
             <form onSubmit={handleGeneratePurchase} className="space-y-4">
@@ -417,7 +532,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Right Output */}
         <div className="lg:col-span-7 rounded-2xl border border-slate-800 bg-[#121826]/90 p-5 shadow-xl flex flex-col">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <div>
