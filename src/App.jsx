@@ -10,7 +10,6 @@ const DURATION_OPTIONS = [
 
 // Obfuscated at build time by javascript-obfuscator (Base64 split string array)
 const B32 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const ADMIN_HASH = '97e8795e352e6c24e5e4ee65ef55eca87471eef9289df882dc14da45133600f2';
 const CLOUD_EP = 'https://script.google.com/macros/s/AKfycbycHI__GWawFJ433QnrIHxTsGE6m-UxmNvSZuKe2kjsVSCNyVEEXATfOJ1eMza9EmOF/exec';
 const CLOUD_SEC = 'JEBTOOL_GAS_SECRET_2026_9F4A7C2E';
 
@@ -31,7 +30,6 @@ function genRedeemCode() {
 }
 
 async function callCloudSheets(action, payload) {
-  // text/plain avoids CORS preflight OPTIONS on Google Apps Script Web App
   const res = await fetch(CLOUD_EP, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -42,24 +40,40 @@ async function callCloudSheets(action, payload) {
 }
 
 export default function App() {
-  const [token, setToken] = useState(() => sessionStorage.getItem('jeb_admin_tok') || '');
-  const [password, setPassword] = useState('');
-  const [loginErr, setLoginErr] = useState('');
-  const [loginBusy, setLoginBusy] = useState(false);
+  const [session, setSession] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem('jeb_admin_sess');
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
 
-  // mode: 'csharp' (local C# server) | 'cloud' (GitHub Pages direct to Google Sheets)
-  const [mode, setMode] = useState('checking');
-  const [health, setHealth] = useState({ ok: false, msg: 'Đang kiểm tra kết nối...' });
+  // Auth views: 'login' | 'forgot' | 'force_reset'
+  const [authView, setAuthView] = useState('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [tempAuth, setTempAuth] = useState(null); // { email, tempHash }
+  const [newPass, setNewPass] = useState('');
+  const [confirmPass, setConfirmPass] = useState('');
+  const [authMsg, setAuthMsg] = useState(null); // { type: 'ok'|'error', text }
+  const [authBusy, setAuthBusy] = useState(false);
+
+  const [health, setHealth] = useState({ ok: true, msg: 'Google Sheets & Gmail Recovery: Sẵn sàng' });
   const [tab, setTab] = useState('purchase');
 
+  // Key forms
   const [pAmount, setPAmount] = useState(1);
   const [pDays, setPDays] = useState(0);
   const [pPackage, setPPackage] = useState('LIFETIME');
-
   const [rAmount, setRAmount] = useState(1);
   const [rExpiresDays, setRExpiresDays] = useState(0);
-
   const [revokeKey, setRevokeKey] = useState('');
+
+  // Account settings form
+  const [setCurPw, setSetCurPw] = useState('');
+  const [setNewPw, setSetNewPw] = useState('');
+  const [setNewEmail, setSetNewEmail] = useState('');
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
@@ -69,75 +83,126 @@ export default function App() {
   const [copiedIdx, setCopiedIdx] = useState(-1);
 
   useEffect(() => {
-    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-    if (isLocal) {
-      fetch('/api/health')
-        .then((r) => r.json())
-        .then((d) => {
-          if (d.ok) {
-            setMode('csharp');
-            setHealth({ ok: true, msg: 'C# Backend + Google Sheets: Sẵn sàng' });
-          } else {
-            setMode('cloud');
-            setHealth({ ok: true, msg: 'Cloud Mode (GitHub Pages → Google Sheets): Sẵn sàng' });
-          }
-        })
-        .catch(() => {
-          setMode('cloud');
-          setHealth({ ok: true, msg: 'Cloud Mode (GitHub Pages → Google Sheets): Sẵn sàng' });
-        });
-    } else {
-      setMode('cloud');
-      setHealth({ ok: true, msg: 'Cloud Mode (GitHub Pages → Google Sheets): Sẵn sàng' });
-    }
+    fetch(CLOUD_EP, { redirect: 'follow' })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.ok) setHealth({ ok: true, msg: 'Kết nối Google Sheets & Gmail Recovery: Sẵn sàng' });
+      })
+      .catch(() => {
+        setHealth({ ok: true, msg: 'Cloud Mode (GitHub Pages → Google Sheets): Sẵn sàng' });
+      });
   }, []);
 
-  async function apiPost(path, body) {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({ ok: false, error: 'Phản hồi không hợp lệ' }));
-    if (res.status === 401) {
-      sessionStorage.removeItem('jeb_admin_tok');
-      setToken('');
-    }
-    return data;
+  function saveSession(obj) {
+    sessionStorage.setItem('jeb_admin_sess', JSON.stringify(obj));
+    setSession(obj);
+  }
+
+  function logout() {
+    sessionStorage.removeItem('jeb_admin_sess');
+    setSession(null);
+    setAuthView('login');
+    setAuthMsg(null);
+    setPassword('');
   }
 
   async function handleLogin(e) {
     e.preventDefault();
-    setLoginErr('');
-    setLoginBusy(true);
+    setAuthMsg(null);
+    setAuthBusy(true);
     try {
-      if (mode === 'csharp') {
-        const res = await apiPost('/api/login', { password });
-        if (res.ok && res.token) {
-          sessionStorage.setItem('jeb_admin_tok', res.token);
-          setToken(res.token);
-          setPassword('');
-        } else {
-          setLoginErr(res.error || 'Mật khẩu Admin không đúng!');
-        }
-      } else {
-        const h = await sha256Hex(password);
-        if (h === ADMIN_HASH) {
-          const tok = 'cloud_' + Date.now();
-          sessionStorage.setItem('jeb_admin_tok', tok);
-          setToken(tok);
-          setPassword('');
-        } else {
-          setLoginErr('Mật khẩu Admin không đúng!');
-        }
+      const cleanEmail = email.trim().toLowerCase();
+      const pwHash = await sha256Hex(password);
+      const res = await callCloudSheets('admin_login', {
+        email: cleanEmail,
+        password_hash: pwHash,
+      });
+
+      if (!res.ok) {
+        setAuthMsg({ type: 'error', text: res.error || 'Gmail Admin hoặc mật khẩu không đúng!' });
+        return;
       }
-    } catch {
-      setLoginErr('Không thể xác thực lúc này!');
+
+      if (res.must_change_password) {
+        // Logged in with temporary password from Gmail -> MUST set new password before entering!
+        setTempAuth({ email: res.admin_email || cleanEmail, tempHash: pwHash });
+        setNewPass('');
+        setConfirmPass('');
+        setPassword('');
+        setAuthView('force_reset');
+        setAuthMsg({
+          type: 'ok',
+          text: 'Mật khẩu tạm hợp lệ! Vui lòng đặt mật khẩu Admin mới để tiếp tục vào hệ thống.',
+        });
+        return;
+      }
+
+      saveSession({ email: res.admin_email || cleanEmail, pwHash });
+      setPassword('');
+    } catch (err) {
+      setAuthMsg({ type: 'error', text: 'Lỗi kết nối máy chủ xác thực: ' + (err.message || err) });
     } finally {
-      setLoginBusy(false);
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleForgot(e) {
+    e.preventDefault();
+    setAuthMsg(null);
+    setAuthBusy(true);
+    try {
+      const cleanEmail = email.trim().toLowerCase();
+      const res = await callCloudSheets('admin_forgot_password', { email: cleanEmail });
+      if (!res.ok) {
+        setAuthMsg({ type: 'error', text: res.error || 'Không thể gửi mật khẩu tạm!' });
+        return;
+      }
+      setAuthView('login');
+      setPassword('');
+      setAuthMsg({
+        type: 'ok',
+        text: res.message || `Đã gửi mật khẩu tạm đến ${cleanEmail} (hiệu lực 15 phút). Hãy kiểm tra Gmail và đăng nhập để đổi mật khẩu mới!`,
+      });
+    } catch (err) {
+      setAuthMsg({ type: 'error', text: 'Lỗi gửi Gmail (hãy đảm bảo đã cập nhật Code.gs mới nhất): ' + (err.message || err) });
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleForceReset(e) {
+    e.preventDefault();
+    setAuthMsg(null);
+    if (newPass.length < 6) {
+      setAuthMsg({ type: 'error', text: 'Mật khẩu mới phải có ít nhất 6 ký tự!' });
+      return;
+    }
+    if (newPass !== confirmPass) {
+      setAuthMsg({ type: 'error', text: 'Mật khẩu xác nhận không khớp!' });
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      const newHash = await sha256Hex(newPass);
+      const res = await callCloudSheets('admin_change_password', {
+        email: tempAuth.email,
+        current_hash: tempAuth.tempHash,
+        new_password_hash: newHash,
+      });
+      if (!res.ok) {
+        setAuthMsg({ type: 'error', text: res.error || 'Không thể đổi mật khẩu mới!' });
+        return;
+      }
+      // Password changed -> enter Web KeyGen Portal immediately!
+      saveSession({ email: tempAuth.email, pwHash: newHash });
+      setTempAuth(null);
+      setNewPass('');
+      setConfirmPass('');
+      setNotice({ type: 'ok', text: 'Đã đổi mật khẩu Admin mới thành công và đăng nhập vào hệ thống!' });
+    } catch (err) {
+      setAuthMsg({ type: 'error', text: 'Lỗi cập nhật mật khẩu: ' + (err.message || err) });
+    } finally {
+      setAuthBusy(false);
     }
   }
 
@@ -148,47 +213,30 @@ export default function App() {
     const amt = Math.max(1, Math.min(50, Number(pAmount) || 1));
     const days = Math.max(0, Math.min(3650, Number(pDays) || 0));
     const pkg = (pPackage || (days === 0 ? 'LIFETIME' : `VIP-${days}D`)).trim().toUpperCase();
-
     try {
-      let keys = [];
-      if (mode === 'csharp') {
-        const res = await apiPost('/api/keys/purchase', { amount: amt, duration_days: days, package_type: pkg });
-        if (!res.ok) {
-          setNotice({ type: 'error', text: res.error || 'Tạo Purchase Key thất bại!' });
-          return;
-        }
-        keys = res.keys || [];
-      } else {
-        const seen = new Set();
-        const hashes = [];
-        while (keys.length < amt) {
-          const k = genRedeemCode();
-          if (!seen.has(k)) {
-            seen.add(k);
-            keys.push(k);
-            hashes.push(await sha256Hex(k));
-          }
-        }
-        const gs = await callCloudSheets('create_purchase_keys', {
-          key_hashes: hashes,
-          duration_days: days,
-          package_type: pkg,
-          created_by: 'WEB_KEYGEN_CLOUD',
-        });
-        if (!gs.ok) {
-          setNotice({ type: 'error', text: gs.error || 'Lỗi lưu Google Sheets!' });
-          return;
+      const keys = [];
+      const seen = new Set();
+      const hashes = [];
+      while (keys.length < amt) {
+        const k = genRedeemCode();
+        if (!seen.has(k)) {
+          seen.add(k);
+          keys.push(k);
+          hashes.push(await sha256Hex(k));
         }
       }
-
+      const gs = await callCloudSheets('create_purchase_keys', {
+        key_hashes: hashes,
+        duration_days: days,
+        package_type: pkg,
+        created_by: session.email,
+      });
+      if (!gs.ok) {
+        setNotice({ type: 'error', text: gs.error || 'Lỗi lưu Google Sheets!' });
+        return;
+      }
       setGeneratedKeys(keys);
-      const meta = {
-        kind: 'PURCHASE KEY',
-        pkg,
-        days,
-        count: keys.length,
-        time: new Date().toLocaleTimeString('vi-VN'),
-      };
+      const meta = { kind: 'PURCHASE KEY', pkg, days, count: keys.length, time: new Date().toLocaleTimeString('vi-VN') };
       setLastMeta(meta);
       setHistory((prev) => [{ ...meta, keys }, ...prev].slice(0, 15));
       setNotice({ type: 'ok', text: `Đã tạo ${meta.count} Purchase Key (${pkg}) và đồng bộ Google Sheets thành công!` });
@@ -205,47 +253,30 @@ export default function App() {
     setNotice(null);
     const amt = Math.max(1, Math.min(50, Number(rAmount) || 1));
     const expDays = Math.max(0, Math.min(3650, Number(rExpiresDays) || 0));
-
     try {
-      let keys = [];
-      if (mode === 'csharp') {
-        const res = await apiPost('/api/keys/reset', { amount: amt, expires_days: expDays });
-        if (!res.ok) {
-          setNotice({ type: 'error', text: res.error || 'Tạo Reset Key thất bại!' });
-          return;
-        }
-        keys = res.keys || [];
-      } else {
-        const seen = new Set();
-        const hashes = [];
-        while (keys.length < amt) {
-          const k = genRedeemCode();
-          if (!seen.has(k)) {
-            seen.add(k);
-            keys.push(k);
-            hashes.push(await sha256Hex(k));
-          }
-        }
-        const expIso = expDays > 0 ? new Date(Date.now() + expDays * 86400000).toISOString() : '';
-        const gs = await callCloudSheets('create_reset_keys', {
-          key_hashes: hashes,
-          expires_at: expIso,
-          created_by: 'WEB_KEYGEN_CLOUD',
-        });
-        if (!gs.ok) {
-          setNotice({ type: 'error', text: gs.error || 'Lỗi lưu Google Sheets!' });
-          return;
+      const keys = [];
+      const seen = new Set();
+      const hashes = [];
+      while (keys.length < amt) {
+        const k = genRedeemCode();
+        if (!seen.has(k)) {
+          seen.add(k);
+          keys.push(k);
+          hashes.push(await sha256Hex(k));
         }
       }
-
+      const expIso = expDays > 0 ? new Date(Date.now() + expDays * 86400000).toISOString() : '';
+      const gs = await callCloudSheets('create_reset_keys', {
+        key_hashes: hashes,
+        expires_at: expIso,
+        created_by: session.email,
+      });
+      if (!gs.ok) {
+        setNotice({ type: 'error', text: gs.error || 'Lỗi lưu Google Sheets!' });
+        return;
+      }
       setGeneratedKeys(keys);
-      const meta = {
-        kind: 'RESET KEY (7 ngày)',
-        pkg: 'RESET-7D',
-        days: expDays,
-        count: keys.length,
-        time: new Date().toLocaleTimeString('vi-VN'),
-      };
+      const meta = { kind: 'RESET KEY (7 ngày)', pkg: 'RESET-7D', days: expDays, count: keys.length, time: new Date().toLocaleTimeString('vi-VN') };
       setLastMeta(meta);
       setHistory((prev) => [{ ...meta, keys }, ...prev].slice(0, 15));
       setNotice({ type: 'ok', text: `Đã tạo ${meta.count} Reset Key và đồng bộ Google Sheets thành công!` });
@@ -262,16 +293,11 @@ export default function App() {
     setBusy(true);
     setNotice(null);
     try {
-      let res;
-      if (mode === 'csharp') {
-        res = await apiPost('/api/keys/revoke', { key: revokeKey.trim() });
-      } else {
-        const norm = revokeKey.trim().toUpperCase().replace(/\s+/g, '');
-        res = await callCloudSheets('revoke_key', {
-          key_hash: await sha256Hex(norm),
-          revoked_by: 'WEB_KEYGEN_CLOUD',
-        });
-      }
+      const norm = revokeKey.trim().toUpperCase().replace(/\s+/g, '');
+      const res = await callCloudSheets('revoke_key', {
+        key_hash: await sha256Hex(norm),
+        revoked_by: session.email,
+      });
       if (!res.ok) {
         setNotice({ type: 'error', text: res.error || 'Không tìm thấy key UNUSED để thu hồi!' });
         return;
@@ -280,6 +306,52 @@ export default function App() {
       setNotice({ type: 'ok', text: `Đã thu hồi (REVOKED) key trong bảng ${res.table || 'Google Sheets'}!` });
     } catch (err) {
       setNotice({ type: 'error', text: 'Lỗi kết nối: ' + (err.message || err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateAccount(e) {
+    e.preventDefault();
+    setBusy(true);
+    setNotice(null);
+    try {
+      const curHash = await sha256Hex(setCurPw);
+      if (setNewEmail.trim()) {
+        const resE = await callCloudSheets('admin_update_email', {
+          email: session.email,
+          current_hash: curHash,
+          new_email: setNewEmail.trim().toLowerCase(),
+        });
+        if (!resE.ok) {
+          setNotice({ type: 'error', text: resE.error || 'Đổi Gmail Admin thất bại!' });
+          return;
+        }
+        saveSession({ ...session, email: resE.admin_email });
+        setSetNewEmail('');
+      }
+      if (setNewPw.trim()) {
+        if (setNewPw.length < 6) {
+          setNotice({ type: 'error', text: 'Mật khẩu mới phải từ 6 ký tự trở lên!' });
+          return;
+        }
+        const newH = await sha256Hex(setNewPw);
+        const resP = await callCloudSheets('admin_change_password', {
+          email: setNewEmail.trim() ? setNewEmail.trim().toLowerCase() : session.email,
+          current_hash: curHash,
+          new_password_hash: newH,
+        });
+        if (!resP.ok) {
+          setNotice({ type: 'error', text: resP.error || 'Đổi mật khẩu thất bại!' });
+          return;
+        }
+        saveSession({ email: setNewEmail.trim() ? setNewEmail.trim().toLowerCase() : session.email, pwHash: newH });
+        setSetNewPw('');
+      }
+      setSetCurPw('');
+      setNotice({ type: 'ok', text: 'Đã cập nhật thông tin tài khoản Admin lên Google Sheets thành công!' });
+    } catch (err) {
+      setNotice({ type: 'error', text: 'Lỗi cập nhật: ' + (err.message || err) });
     } finally {
       setBusy(false);
     }
@@ -303,60 +375,187 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
-  if (!token) {
+  // ==================== AUTH SCREENS ====================
+  if (!session) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-[#121826]/95 shadow-2xl overflow-hidden">
           <div className="bg-[#0e1117] p-4 flex justify-center border-b border-slate-800">
             <img src="./logo.jpg" alt="Jebtool" className="h-36 object-contain rounded-lg" />
           </div>
-          <form onSubmit={handleLogin} className="p-6 space-y-4">
-            <div className="text-center">
-              <h1 className="text-xl font-bold text-amber-400 tracking-wide">JEBTOOL WEB KEYGEN</h1>
-              <p className="text-xs text-slate-400 mt-1">Đăng nhập quản trị để tạo Key Redeem đồng bộ Google Sheets</p>
-            </div>
 
-            <div className={`text-xs px-3 py-2 rounded-lg border flex items-center gap-2 ${
-              health.ok
-                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-            }`}>
-              <span className={`w-2 h-2 rounded-full ${health.ok ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-              <span>{health.msg}</span>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1.5">Mật khẩu Admin</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Nhập mật khẩu quản trị..."
-                className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-4 py-2.5 text-sm text-amber-200 focus:outline-none focus:border-amber-400"
-                autoFocus
-                required
-              />
-            </div>
-
-            {loginErr && (
-              <div className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">
-                {loginErr}
+          {authView === 'login' && (
+            <form onSubmit={handleLogin} className="p-6 space-y-4">
+              <div className="text-center">
+                <h1 className="text-xl font-bold text-amber-400 tracking-wide">JEBTOOL WEB KEYGEN</h1>
+                <p className="text-xs text-slate-400 mt-1">Đăng nhập bằng Gmail Admin & Mật khẩu quản trị</p>
               </div>
-            )}
 
-            <button
-              type="submit"
-              disabled={loginBusy}
-              className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition disabled:opacity-50"
-            >
-              {loginBusy ? 'Đang xác thực...' : 'Đăng nhập Admin'}
-            </button>
-          </form>
+              <div className="text-xs px-3 py-2 rounded-lg border flex items-center gap-2 bg-emerald-500/10 border-emerald-500/30 text-emerald-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                <span>{health.msg}</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">Gmail Admin</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="admin@gmail.com"
+                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-4 py-2.5 text-sm text-sky-200 focus:outline-none focus:border-amber-400"
+                  required
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-medium text-slate-300">Mật khẩu Admin (hoặc mật khẩu tạm)</label>
+                  <button
+                    type="button"
+                    onClick={() => { setAuthView('forgot'); setAuthMsg(null); }}
+                    className="text-xs text-amber-400 hover:text-amber-300 hover:underline"
+                  >
+                    Quên mật khẩu?
+                  </button>
+                </div>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Nhập mật khẩu quản trị..."
+                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-4 py-2.5 text-sm text-amber-200 focus:outline-none focus:border-amber-400"
+                  required
+                />
+              </div>
+
+              {authMsg && (
+                <div className={`text-xs rounded-lg px-3 py-2 border ${
+                  authMsg.type === 'ok'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                }`}>
+                  {authMsg.text}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authBusy}
+                className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition disabled:opacity-50"
+              >
+                {authBusy ? 'Đang xác thực...' : 'Đăng nhập Admin'}
+              </button>
+            </form>
+          )}
+
+          {authView === 'forgot' && (
+            <form onSubmit={handleForgot} className="p-6 space-y-4">
+              <div className="text-center">
+                <h1 className="text-lg font-bold text-amber-400">QUÊN MẬT KHẨU ADMIN</h1>
+                <p className="text-xs text-slate-400 mt-1">
+                  Nhập Gmail Admin để nhận <b>mật khẩu tạm</b> (hiệu lực 15 phút). Sau khi đăng nhập bằng mật khẩu tạm, bạn sẽ đặt mật khẩu mới để vào hệ thống.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">Gmail Admin đã đăng ký</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="admin@gmail.com"
+                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-4 py-2.5 text-sm text-sky-200 focus:outline-none focus:border-amber-400"
+                  required
+                />
+              </div>
+
+              {authMsg && (
+                <div className={`text-xs rounded-lg px-3 py-2 border ${
+                  authMsg.type === 'ok'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                }`}>
+                  {authMsg.text}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authBusy}
+                className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition disabled:opacity-50"
+              >
+                {authBusy ? 'Đang gửi Gmail...' : 'Gửi mật khẩu tạm về Gmail'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => { setAuthView('login'); setAuthMsg(null); }}
+                className="w-full py-2 rounded-xl border border-slate-700 text-slate-300 hover:text-white text-xs transition"
+              >
+                ← Quay lại đăng nhập
+              </button>
+            </form>
+          )}
+
+          {authView === 'force_reset' && (
+            <form onSubmit={handleForceReset} className="p-6 space-y-4">
+              <div className="text-center">
+                <h1 className="text-lg font-bold text-emerald-400">ĐẶT MẬT KHẨU ADMIN MỚI</h1>
+                <p className="text-xs text-slate-400 mt-1">
+                  Bạn đang đăng nhập bằng mật khẩu tạm. Hãy đổi sang mật khẩu mới để mở khóa trang quản trị!
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">Mật khẩu mới (tối thiểu 6 ký tự)</label>
+                <input
+                  type="password"
+                  value={newPass}
+                  onChange={(e) => setNewPass(e.target.value)}
+                  placeholder="Nhập mật khẩu mới..."
+                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-4 py-2.5 text-sm text-amber-200 focus:outline-none focus:border-emerald-400"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">Xác nhận mật khẩu mới</label>
+                <input
+                  type="password"
+                  value={confirmPass}
+                  onChange={(e) => setConfirmPass(e.target.value)}
+                  placeholder="Nhập lại mật khẩu mới..."
+                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-4 py-2.5 text-sm text-amber-200 focus:outline-none focus:border-emerald-400"
+                  required
+                />
+              </div>
+
+              {authMsg && (
+                <div className={`text-xs rounded-lg px-3 py-2 border ${
+                  authMsg.type === 'ok'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                }`}>
+                  {authMsg.text}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authBusy}
+                className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm transition disabled:opacity-50"
+              >
+                {authBusy ? 'Đang lưu mật khẩu mới...' : 'Lưu mật khẩu mới & Vào Portal'}
+              </button>
+            </form>
+          )}
         </div>
       </div>
     );
   }
 
+  // ==================== MAIN ADMIN PORTAL ====================
   return (
     <div className="min-h-screen p-4 md:p-8 max-w-5xl mx-auto space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-[#121826]/90 px-5 py-4 shadow-xl">
@@ -364,15 +563,15 @@ export default function App() {
           <img src="./logo.jpg" alt="Jebtool" className="h-12 w-12 rounded-xl object-cover border border-amber-500/40" />
           <div>
             <h1 className="text-lg md:text-xl font-bold text-amber-400">JEBTOOL — WEB KEYGEN PORTAL</h1>
-            <p className="text-xs text-slate-400">Tạo Key Redeem ngẫu nhiên không trùng lặp → Đồng bộ trực tiếp Google Sheets & Discord Bot</p>
+            <p className="text-xs text-slate-400">Admin: <span className="text-sky-300">{session.email}</span> • Đồng bộ Google Sheets & Discord Bot</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs px-3 py-1.5 rounded-full border bg-emerald-500/10 border-emerald-500/30 text-emerald-300">
-            ● {mode === 'csharp' ? 'C# Backend Online' : 'Cloud Sheets Online'}
+            ● Cloud Sheets Online
           </span>
           <button
-            onClick={() => { sessionStorage.removeItem('jeb_admin_tok'); setToken(''); }}
+            onClick={logout}
             className="text-xs px-3 py-1.5 rounded-lg border border-slate-700 hover:border-rose-400 text-slate-300 hover:text-rose-300 transition"
           >
             Đăng xuất
@@ -382,9 +581,10 @@ export default function App() {
 
       <div className="flex flex-wrap gap-2">
         {[
-          { id: 'purchase', label: '1. Tạo Purchase Key (Mua Tool)' },
-          { id: 'reset', label: '2. Tạo Reset Key (Cooldown 7 ngày)' },
-          { id: 'revoke', label: '3. Thu hồi Key (Revoke)' },
+          { id: 'purchase', label: '1. Tạo Purchase Key' },
+          { id: 'reset', label: '2. Tạo Reset Key (7 ngày)' },
+          { id: 'revoke', label: '3. Thu hồi Key' },
+          { id: 'account', label: '4. Gmail & Mật khẩu Admin' },
         ].map((t) => (
           <button
             key={t.id}
@@ -517,6 +717,53 @@ export default function App() {
                 className="w-full py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-bold text-sm transition disabled:opacity-50"
               >
                 {busy ? 'Đang xử lý...' : 'Thu hồi Key (REVOKED)'}
+              </button>
+            </form>
+          )}
+
+          {tab === 'account' && (
+            <form onSubmit={handleUpdateAccount} className="space-y-4">
+              <h2 className="text-base font-bold text-slate-100">Cài đặt Gmail & Mật khẩu Admin</h2>
+              <p className="text-xs text-slate-400">
+                Gmail hiện tại: <b className="text-sky-300">{session.email}</b> (dùng để đăng nhập và nhận mật khẩu tạm khi quên mật khẩu).
+              </p>
+              <div>
+                <label className="block text-xs text-slate-300 mb-1">Mật khẩu hiện tại (bắt buộc)</label>
+                <input
+                  type="password"
+                  value={setCurPw}
+                  onChange={(e) => setSetCurPw(e.target.value)}
+                  placeholder="Nhập mật khẩu hiện tại..."
+                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-3.5 py-2 text-sm text-amber-200 focus:outline-none focus:border-amber-400"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-300 mb-1">Đổi Gmail Admin mới (để trống nếu giữ nguyên)</label>
+                <input
+                  type="email"
+                  value={setNewEmail}
+                  onChange={(e) => setSetNewEmail(e.target.value)}
+                  placeholder="gmail-moi@gmail.com"
+                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-3.5 py-2 text-sm text-sky-200 focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-300 mb-1">Đổi Mật khẩu mới (để trống nếu giữ nguyên)</label>
+                <input
+                  type="password"
+                  value={setNewPw}
+                  onChange={(e) => setSetNewPw(e.target.value)}
+                  placeholder="Mật khẩu mới (>= 6 ký tự)..."
+                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-3.5 py-2 text-sm text-amber-200 focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={busy}
+                className="w-full py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-sm transition disabled:opacity-50"
+              >
+                {busy ? 'Đang lưu...' : 'Lưu cài đặt Admin'}
               </button>
             </form>
           )}
