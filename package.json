@@ -5,7 +5,7 @@
   "description": "Jebtool Admin Web KeyGen (React + Tailwind CSS + C# Backend + Obfuscated)",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node scripts/obfuscate.cjs",
+    "build": "node scripts/gen-vault.cjs && vite build && node scripts/obfuscate.cjs",
     "preview": "vite preview"
   },
   "dependencies": {

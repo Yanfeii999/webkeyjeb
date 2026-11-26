@@ -14,10 +14,10 @@ export default defineConfig({
       input: path.resolve(__dirname, 'vite.html'),
       output: {
         manualChunks(id) {
-          if (id.includes('node_modules')) return 'vendor';
+          if (id.includes('node_modules')) return 'v';
         },
-        entryFileNames: 'assets/app-[hash].js',
-        chunkFileNames: 'assets/[name]-[hash].js',
+        entryFileNames: 'assets/c-[hash].js',
+        chunkFileNames: 'assets/v-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
       },
     },

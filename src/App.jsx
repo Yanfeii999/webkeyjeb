@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { callVault, pingVault } from './core/vault.js';
 
 const DURATION_OPTIONS = [
   { value: 0, label: '0 — Vĩnh viễn (Lifetime)' },
@@ -8,10 +9,7 @@ const DURATION_OPTIONS = [
   { value: 365, label: '365 ngày' },
 ];
 
-// Obfuscated at build time by javascript-obfuscator (Base64 split string array)
 const B32 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const CLOUD_EP = 'https://script.google.com/macros/s/AKfycbycHI__GWawFJ433QnrIHxTsGE6m-UxmNvSZuKe2kjsVSCNyVEEXATfOJ1eMza9EmOF/exec';
-const CLOUD_SEC = 'JEBTOOL_GAS_SECRET_2026_9F4A7C2E';
 
 async function sha256Hex(str) {
   const buf = new TextEncoder().encode(str || '');
@@ -27,16 +25,6 @@ function genRedeemCode() {
   let out = '';
   for (let i = 0; i < 12; i++) out += B32[arr[i] % B32.length];
   return `${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8, 12)}`;
-}
-
-async function callCloudSheets(action, payload) {
-  const res = await fetch(CLOUD_EP, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    redirect: 'follow',
-    body: JSON.stringify({ secret: CLOUD_SEC, action, ...payload }),
-  });
-  return res.json();
 }
 
 export default function App() {
@@ -83,8 +71,7 @@ export default function App() {
   const [copiedIdx, setCopiedIdx] = useState(-1);
 
   useEffect(() => {
-    fetch(CLOUD_EP, { redirect: 'follow' })
-      .then((r) => r.json())
+    pingVault()
       .then((d) => {
         if (d.ok) setHealth({ ok: true, msg: 'Kết nối Google Sheets & Gmail Recovery: Sẵn sàng' });
       })
@@ -113,7 +100,7 @@ export default function App() {
     try {
       const cleanEmail = email.trim().toLowerCase();
       const pwHash = await sha256Hex(password);
-      const res = await callCloudSheets('admin_login', {
+      const res = await callVault('admin_login', {
         email: cleanEmail,
         password_hash: pwHash,
       });
@@ -152,7 +139,7 @@ export default function App() {
     setAuthBusy(true);
     try {
       const cleanEmail = email.trim().toLowerCase();
-      const res = await callCloudSheets('admin_forgot_password', { email: cleanEmail });
+      const res = await callVault('admin_forgot_password', { email: cleanEmail });
       if (!res.ok) {
         setAuthMsg({ type: 'error', text: res.error || 'Không thể gửi mật khẩu tạm!' });
         return;
@@ -164,7 +151,7 @@ export default function App() {
         text: res.message || `Đã gửi mật khẩu tạm đến ${cleanEmail} (hiệu lực 15 phút). Hãy kiểm tra Gmail và đăng nhập để đổi mật khẩu mới!`,
       });
     } catch (err) {
-      setAuthMsg({ type: 'error', text: 'Lỗi gửi Gmail (hãy đảm bảo đã cập nhật Code.gs mới nhất): ' + (err.message || err) });
+      setAuthMsg({ type: 'error', text: 'Lỗi gửi Gmail xác thực: ' + (err.message || err) });
     } finally {
       setAuthBusy(false);
     }
@@ -184,7 +171,7 @@ export default function App() {
     setAuthBusy(true);
     try {
       const newHash = await sha256Hex(newPass);
-      const res = await callCloudSheets('admin_change_password', {
+      const res = await callVault('admin_change_password', {
         email: tempAuth.email,
         current_hash: tempAuth.tempHash,
         new_password_hash: newHash,
@@ -225,7 +212,7 @@ export default function App() {
           hashes.push(await sha256Hex(k));
         }
       }
-      const gs = await callCloudSheets('create_purchase_keys', {
+      const gs = await callVault('create_purchase_keys', {
         key_hashes: hashes,
         duration_days: days,
         package_type: pkg,
@@ -266,7 +253,7 @@ export default function App() {
         }
       }
       const expIso = expDays > 0 ? new Date(Date.now() + expDays * 86400000).toISOString() : '';
-      const gs = await callCloudSheets('create_reset_keys', {
+      const gs = await callVault('create_reset_keys', {
         key_hashes: hashes,
         expires_at: expIso,
         created_by: session.email,
@@ -294,7 +281,7 @@ export default function App() {
     setNotice(null);
     try {
       const norm = revokeKey.trim().toUpperCase().replace(/\s+/g, '');
-      const res = await callCloudSheets('revoke_key', {
+      const res = await callVault('revoke_key', {
         key_hash: await sha256Hex(norm),
         revoked_by: session.email,
       });
@@ -318,7 +305,7 @@ export default function App() {
     try {
       const curHash = await sha256Hex(setCurPw);
       if (setNewEmail.trim()) {
-        const resE = await callCloudSheets('admin_update_email', {
+        const resE = await callVault('admin_update_email', {
           email: session.email,
           current_hash: curHash,
           new_email: setNewEmail.trim().toLowerCase(),
@@ -336,7 +323,7 @@ export default function App() {
           return;
         }
         const newH = await sha256Hex(setNewPw);
-        const resP = await callCloudSheets('admin_change_password', {
+        const resP = await callVault('admin_change_password', {
           email: setNewEmail.trim() ? setNewEmail.trim().toLowerCase() : session.email,
           current_hash: curHash,
           new_password_hash: newH,
