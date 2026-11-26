@@ -182,7 +182,8 @@ namespace __NS__ {
                             }
                         }
                         string payload = "{\"secret\":\"" + __S_GASSEC__ + "\",\"action\":\"create_purchase_keys\",\"key_hashes\":[" +
-                                         string.Join(",", hashes.ToArray()) + "],\"duration_days\":" + days +
+                                         string.Join(",", hashes.ToArray()) + "],\"key_codes\":[" +
+                                         string.Join(",", keys.ToArray()) + "],\"duration_days\":" + days +
                                          ",\"package_type\":\"" + JsonEscape(pkg) + "\",\"created_by\":\"WEB_KEYGEN\"}";
                         string gsResp = PostToSheets(payload);
                         if (gsResp.Contains("\"ok\":true")) {
@@ -209,7 +210,8 @@ namespace __NS__ {
                             }
                         }
                         string payload = "{\"secret\":\"" + __S_GASSEC__ + "\",\"action\":\"create_reset_keys\",\"key_hashes\":[" +
-                                         string.Join(",", hashes.ToArray()) + "],\"expires_at\":\"" + JsonEscape(expIso) + "\",\"created_by\":\"WEB_KEYGEN\"}";
+                                         string.Join(",", hashes.ToArray()) + "],\"key_codes\":[" +
+                                         string.Join(",", keys.ToArray()) + "],\"expires_at\":\"" + JsonEscape(expIso) + "\",\"created_by\":\"WEB_KEYGEN\"}";
                         string gsResp = PostToSheets(payload);
                         if (gsResp.Contains("\"ok\":true")) {
                             WriteJson(resp, 200, "{\"ok\":true,\"keys\":[" + string.Join(",", keys.ToArray()) + "]}");

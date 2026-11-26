@@ -69,6 +69,9 @@ export default function App() {
   const [lastMeta, setLastMeta] = useState(null);
   const [history, setHistory] = useState([]);
   const [copiedIdx, setCopiedIdx] = useState(-1);
+  const [sheetKeys, setSheetKeys] = useState([]);
+  const [sheetKeysLoading, setSheetKeysLoading] = useState(false);
+  const [sheetKeysHint, setSheetKeysHint] = useState('');
 
   useEffect(() => {
     pingVault()
@@ -79,6 +82,45 @@ export default function App() {
         setHealth({ ok: true, msg: 'Cloud Mode (GitHub Pages → Google Sheets): Sẵn sàng' });
       });
   }, []);
+
+  useEffect(() => {
+    if (session && tab === 'revoke') {
+      loadSheetKeys();
+    }
+  }, [session, tab]);
+
+  async function resolveKeyTarget(rawInput) {
+    const clean = (rawInput || '').trim().replace(/\s+/g, '');
+    if (!clean) return null;
+    if (/^[a-f0-9]{64}$/i.test(clean)) {
+      return { key_hash: clean.toLowerCase(), key_code: '' };
+    }
+    const norm = clean.toUpperCase();
+    return { key_hash: await sha256Hex(norm), key_code: norm };
+  }
+
+  async function loadSheetKeys() {
+    setSheetKeysLoading(true);
+    setSheetKeysHint('');
+    try {
+      const res = await callVault('list_keys', { limit: 100 });
+      if (res.ok && Array.isArray(res.keys)) {
+        setSheetKeys(res.keys);
+      } else {
+        setSheetKeys([]);
+        setSheetKeysHint(
+          'Cần cập nhật Apps Script (action list_keys) để xem danh sách trực tiếp tại đây. Bạn vẫn có thể dán mã Key hoặc key_hash vào ô trên để thu hồi/xóa.'
+        );
+      }
+    } catch {
+      setSheetKeys([]);
+      setSheetKeysHint(
+        'Cần cập nhật Apps Script (action list_keys) để xem danh sách trực tiếp tại đây. Bạn vẫn có thể dán mã Key hoặc key_hash vào ô trên để thu hồi/xóa.'
+      );
+    } finally {
+      setSheetKeysLoading(false);
+    }
+  }
 
   function saveSession(obj) {
     sessionStorage.setItem('jeb_admin_sess', JSON.stringify(obj));
@@ -214,6 +256,7 @@ export default function App() {
       }
       const gs = await callVault('create_purchase_keys', {
         key_hashes: hashes,
+        key_codes: keys,
         duration_days: days,
         package_type: pkg,
         created_by: session.email,
@@ -255,6 +298,7 @@ export default function App() {
       const expIso = expDays > 0 ? new Date(Date.now() + expDays * 86400000).toISOString() : '';
       const gs = await callVault('create_reset_keys', {
         key_hashes: hashes,
+        key_codes: keys,
         expires_at: expIso,
         created_by: session.email,
       });
@@ -274,23 +318,51 @@ export default function App() {
     }
   }
 
-  async function handleRevoke(e) {
-    e.preventDefault();
-    if (!revokeKey.trim()) return;
+  async function handleRevoke(e, overrideTarget = null) {
+    if (e && e.preventDefault) e.preventDefault();
+    const target = await resolveKeyTarget(overrideTarget ?? revokeKey);
+    if (!target) return;
     setBusy(true);
     setNotice(null);
     try {
-      const norm = revokeKey.trim().toUpperCase().replace(/\s+/g, '');
       const res = await callVault('revoke_key', {
-        key_hash: await sha256Hex(norm),
+        key_hash: target.key_hash,
+        key_code: target.key_code,
         revoked_by: session.email,
       });
       if (!res.ok) {
         setNotice({ type: 'error', text: res.error || 'Không tìm thấy key UNUSED để thu hồi!' });
         return;
       }
-      setRevokeKey('');
+      if (!overrideTarget) setRevokeKey('');
       setNotice({ type: 'ok', text: `Đã thu hồi (REVOKED) key trong bảng ${res.table || 'Google Sheets'}!` });
+      if (sheetKeys.length > 0) loadSheetKeys();
+    } catch (err) {
+      setNotice({ type: 'error', text: 'Lỗi kết nối: ' + (err.message || err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteKey(overrideTarget = null) {
+    const target = await resolveKeyTarget(overrideTarget ?? revokeKey);
+    if (!target) return;
+    if (!window.confirm('Bạn có chắc muốn XÓA HẲN key này khỏi Google Sheets?')) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const res = await callVault('delete_key', {
+        key_hash: target.key_hash,
+        key_code: target.key_code,
+        deleted_by: session.email,
+      });
+      if (!res.ok) {
+        setNotice({ type: 'error', text: res.error || 'Không tìm thấy key để xóa khỏi Google Sheets!' });
+        return;
+      }
+      if (!overrideTarget) setRevokeKey('');
+      setNotice({ type: 'ok', text: `Đã xóa key khỏi bảng ${res.table || 'Google Sheets'}!` });
+      loadSheetKeys();
     } catch (err) {
       setNotice({ type: 'error', text: 'Lỗi kết nối: ' + (err.message || err) });
     } finally {
@@ -570,7 +642,7 @@ export default function App() {
         {[
           { id: 'purchase', label: '1. Tạo Purchase Key' },
           { id: 'reset', label: '2. Tạo Reset Key (7 ngày)' },
-          { id: 'revoke', label: '3. Thu hồi Key' },
+          { id: 'revoke', label: '3. Thu hồi & Xóa Key' },
           { id: 'account', label: '4. Gmail & Mật khẩu Admin' },
         ].map((t) => (
           <button
@@ -682,30 +754,113 @@ export default function App() {
           )}
 
           {tab === 'revoke' && (
-            <form onSubmit={handleRevoke} className="space-y-4">
-              <h2 className="text-base font-bold text-slate-100">Thu hồi Key chưa sử dụng</h2>
-              <p className="text-xs text-slate-400">
-                Chuyển trạng thái của một Purchase Key hoặc Reset Key đang <code className="text-amber-300">UNUSED</code> sang <code className="text-rose-400">REVOKED</code>.
-              </p>
-              <div>
-                <label className="block text-xs text-slate-300 mb-1">Nhập mã Key cần thu hồi</label>
-                <input
-                  type="text"
-                  value={revokeKey}
-                  onChange={(e) => setRevokeKey(e.target.value)}
-                  placeholder="XXXX-XXXX-XXXX"
-                  className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-3.5 py-2 text-sm text-amber-300 font-mono uppercase focus:outline-none focus:border-rose-400"
-                  required
-                />
+            <div className="space-y-4">
+              <form onSubmit={handleRevoke} className="space-y-4">
+                <h2 className="text-base font-bold text-slate-100">Thu hồi / Xóa Key</h2>
+                <p className="text-xs text-slate-400">
+                  Chuyển trạng thái của Purchase Key hoặc Reset Key đang <code className="text-amber-300">UNUSED</code> sang <code className="text-rose-400">REVOKED</code>, hoặc xóa hẳn khỏi Google Sheets.
+                </p>
+                <div>
+                  <label className="block text-xs text-slate-300 mb-1">
+                    Nhập mã Key (XXXX-XXXX-XXXX) hoặc dán key_hash từ Google Sheets
+                  </label>
+                  <input
+                    type="text"
+                    value={revokeKey}
+                    onChange={(e) => setRevokeKey(e.target.value)}
+                    placeholder="XXXX-XXXX-XXXX hoặc 64 ký tự key_hash"
+                    className="w-full rounded-xl bg-[#1b2436] border border-slate-700 px-3.5 py-2 text-sm text-amber-300 font-mono focus:outline-none focus:border-rose-400"
+                    required
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition disabled:opacity-50"
+                  >
+                    {busy ? 'Đang xử lý...' : 'Thu hồi (REVOKED)'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !revokeKey.trim()}
+                    onClick={() => handleDeleteKey()}
+                    className="w-full py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-bold text-sm transition disabled:opacity-50"
+                  >
+                    Xóa khỏi Sheet
+                  </button>
+                </div>
+              </form>
+
+              <div className="pt-3 border-t border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-semibold text-slate-300">Danh sách Key trên Google Sheets</h3>
+                  <button
+                    type="button"
+                    onClick={loadSheetKeys}
+                    disabled={sheetKeysLoading}
+                    className="text-xs px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 hover:border-amber-400 transition disabled:opacity-50"
+                  >
+                    {sheetKeysLoading ? 'Đang tải...' : 'Tải lại'}
+                  </button>
+                </div>
+
+                {sheetKeysHint ? (
+                  <div className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2">
+                    {sheetKeysHint}
+                  </div>
+                ) : sheetKeys.length === 0 ? (
+                  <div className="text-xs text-slate-500 py-3 text-center rounded-xl bg-[#0b0f17] border border-slate-800">
+                    {sheetKeysLoading ? 'Đang tải danh sách từ Google Sheets...' : 'Chưa có key nào trong danh sách.'}
+                  </div>
+                ) : (
+                  <div data-allow-copy="true" className="max-h-56 overflow-y-auto space-y-1.5 rounded-xl bg-[#0b0f17] border border-slate-800 p-2">
+                    {sheetKeys.map((item, idx) => {
+                      const targetId = item.key_code || item.key_hash;
+                      const displayCode = item.key_code || (item.key_hash ? `${item.key_hash.slice(0, 12)}...` : 'N/A');
+                      return (
+                        <div
+                          key={`${item.table || 'T'}-${item.key_hash || idx}`}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#141c2c] border border-slate-800/80 px-2.5 py-1.5 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-mono font-semibold text-amber-300 truncate">{displayCode}</div>
+                            <div className="text-[11px] text-slate-400">
+                              {item.table} • {item.package_type || 'N/A'} •{' '}
+                              <span className={item.status === 'UNUSED' ? 'text-emerald-400' : 'text-rose-400'}>
+                                {item.status}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {item.status === 'UNUSED' && targetId && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleRevoke(null, targetId)}
+                                className="px-2 py-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 font-medium disabled:opacity-50"
+                              >
+                                Thu hồi
+                              </button>
+                            )}
+                            {targetId && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleDeleteKey(targetId)}
+                                className="px-2 py-1 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 hover:bg-rose-500/30 font-medium disabled:opacity-50"
+                              >
+                                Xóa
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-              <button
-                type="submit"
-                disabled={busy}
-                className="w-full py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-bold text-sm transition disabled:opacity-50"
-              >
-                {busy ? 'Đang xử lý...' : 'Thu hồi Key (REVOKED)'}
-              </button>
-            </form>
+            </div>
           )}
 
           {tab === 'account' && (
@@ -772,7 +927,7 @@ export default function App() {
               <h2 className="text-base font-bold text-slate-100">
                 Danh sách Key vừa tạo {lastMeta ? `(${lastMeta.kind} • ${lastMeta.count})` : ''}
               </h2>
-              <p className="text-xs text-slate-400">Chỉ SHA-256 hash được lưu trên Google Sheets — hãy sao chép mã bên dưới để gửi khách.</p>
+              <p className="text-xs text-slate-400">Mã Key (key_code) & SHA-256 hash được đồng bộ lên Google Sheets — bạn có thể xem, thu hồi hoặc xóa trực tiếp.</p>
             </div>
             {generatedKeys.length > 0 && (
               <div className="flex gap-2">
